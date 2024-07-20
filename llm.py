@@ -9,6 +9,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="LLM Training Script", add_help=False)
     parser.add_argument("--distributed", action="store_true", help="Enable distributed training")
     args, unknown = parser.parse_known_args()
+
+    print(args)
     
     if num_gpus > 1:
         args.distributed = True

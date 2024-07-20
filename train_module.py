@@ -10,18 +10,12 @@ import math
 from tqdm import tqdm
 import os
 import nltk
-from nltk.corpus import gutenberg, reuters
 import multiprocessing
-import sys
 import argparse
 
+# Ensure NLTK datasets are downloaded if needed
+nltk.download('punkt', quiet=True)  # For tokenization
 
-# Download NLTK data
-nltk.download('gutenberg', quiet=True)
-nltk.download('reuters', quiet=True)
-
-
-# Ensure that the dataset is created only once and reused
 class EnhancedTransformer(nn.Module):
     def __init__(self, vocab_size, d_model, nhead, num_layers, dim_feedforward=1024):
         super(EnhancedTransformer, self).__init__()
@@ -51,15 +45,26 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         return x + self.pe[:, :x.size(1)]
 
-class TextDataset(Dataset):
-    def __init__(self, texts, word2idx, seq_length):
-        self.texts = texts
+class CustomTextDataset(Dataset):
+    def __init__(self, filepath, word2idx, seq_length):
+        self.filepath = filepath
         self.word2idx = word2idx
         self.seq_length = seq_length
-        
+        self.texts = self.load_data(filepath)
+
+    def load_data(self, filepath):
+        with open(filepath, 'r') as file:
+            lines = file.readlines()
+        # Tokenize and preprocess
+        texts = []
+        for line in lines:
+            tokens = nltk.word_tokenize(line.strip().lower())
+            texts.append(' '.join(tokens))
+        return texts
+
     def __len__(self):
         return len(self.texts)
-    
+
     def __getitem__(self, idx):
         text = self.texts[idx]
         encoded = [self.word2idx.get(word, self.word2idx['<UNK>']) for word in text.split()]
@@ -69,26 +74,6 @@ class TextDataset(Dataset):
         src = torch.tensor(encoded[start_idx:start_idx + self.seq_length])
         tgt = torch.tensor(encoded[start_idx + 1:start_idx + self.seq_length + 1])
         return src, tgt
-
-def generate_dataset(num_sentences):
-    print(f"Generating dataset with {num_sentences} sentences...")
-    texts = []
-    # Combine data from Gutenberg and Reuters datasets
-    for corpus in [gutenberg, reuters]:
-        for fileid in tqdm(corpus.fileids(), desc=f"Processing {corpus} texts"):
-            words = corpus.words(fileid)
-            sentences = [' '.join(words[i:i+15]).lower() for i in range(0, len(words), 15)]
-            texts.extend(sentences[:num_sentences // len(corpus.fileids())])
-            if len(texts) >= num_sentences:
-                break
-    return texts[:num_sentences]
-
-def build_vocab(texts, vocab_size):
-    word_counts = Counter(word for text in texts for word in text.lower().split())
-    vocab = ['<PAD>', '<UNK>'] + [word for word, _ in word_counts.most_common(vocab_size - 2)]
-    word2idx = {word: idx for idx, word in enumerate(vocab)}
-    idx2word = {idx: word for word, idx in word2idx.items()}
-    return word2idx, idx2word
 
 def generate_text(model, start_text, word2idx, idx2word, max_length=20, temperature=1.0):
     model.eval()
@@ -108,6 +93,14 @@ def generate_text(model, start_text, word2idx, idx2word, max_length=20, temperat
                 break
     
     return ' '.join(words)
+
+
+def build_vocab(texts, vocab_size):
+    word_counts = Counter(word for text in texts for word in text.lower().split())
+    vocab = ['<PAD>', '<UNK>'] + [word for word, _ in word_counts.most_common(vocab_size - 2)]
+    word2idx = {word: idx for idx, word in enumerate(vocab)}
+    idx2word = {idx: word for word, idx in word2idx.items()}
+    return word2idx, idx2word
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, loss, filename):
@@ -144,7 +137,7 @@ def main(local_rank=None):
     seq_length = 50
     num_epochs = 200
     learning_rate = 0.00005
-    num_sentences = 50000
+    custom_dataset_path = 'large_text_dataset.txt'
     checkpoint_filename = 'enhanced_transformer_checkpoint.pth'
     accumulation_steps = 4
     patience = 5
@@ -164,9 +157,10 @@ def main(local_rank=None):
     print(f"Using device: {device}")
     print(f"Number of GPUs available: {num_gpus}")
 
-    # Generate dataset and build vocab only on rank 0
+    # Load custom dataset and build vocab only on rank 0
     if not is_distributed or local_rank == 0:
-        texts = generate_dataset(num_sentences)
+        dataset = CustomTextDataset(custom_dataset_path, word2idx=None, seq_length=seq_length)
+        texts = dataset.texts
         word2idx, idx2word = build_vocab(texts, vocab_size)
     else:
         texts, word2idx, idx2word = None, None, None
@@ -186,7 +180,7 @@ def main(local_rank=None):
         idx2word = idx2word[0]
 
     # Create dataset and dataloader
-    dataset = TextDataset(texts, word2idx, seq_length)
+    dataset = CustomTextDataset(custom_dataset_path, word2idx, seq_length)
     num_workers = min(multiprocessing.cpu_count(), 8)
 
     if is_distributed:

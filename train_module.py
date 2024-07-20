@@ -153,6 +153,9 @@ def load_checkpoint(model, optimizer, scheduler, filename):
     return 0, float('inf')
 
 def main(local_rank, args):
+    print(f"Local rank: {local_rank}")
+    print(f"Arguments: {args}")
+    
     # Hyperparameters
     vocab_size = 5000
     d_model = 256

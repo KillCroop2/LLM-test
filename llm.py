@@ -3,15 +3,14 @@ import torch
 from train_module import main  # Import the main function from the new module
 
 if __name__ == '__main__':
-    # Check the number of GPUs available
     num_gpus = torch.cuda.device_count()
-    
+
     parser = argparse.ArgumentParser(description="LLM Training Script", add_help=False)
     parser.add_argument("--distributed", action="store_true", help="Enable distributed training")
     args, unknown = parser.parse_known_args()
 
     print(args)
-    
+
     if num_gpus > 1:
         args.distributed = True
 

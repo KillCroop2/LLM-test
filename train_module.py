@@ -152,10 +152,7 @@ def load_checkpoint(model, optimizer, scheduler, filename):
         return epoch, loss
     return 0, float('inf')
 
-def main(local_rank, args):
-    print(f"Local rank: {local_rank}")
-    print(f"Arguments: {args}")
-    
+def main(local_rank=None):
     # Hyperparameters
     vocab_size = 5000
     d_model = 256
@@ -163,64 +160,82 @@ def main(local_rank, args):
     num_layers = 6
     batch_size = 128
     seq_length = 30
-    num_epochs = 1000
+    num_epochs = 100
     learning_rate = 0.0001
     num_sentences = 10000
     checkpoint_filename = 'transformer_checkpoint.pth'
     accumulation_steps = 4
     patience = 5
 
-   # Initialize the distributed environment.
-    if args.distributed:
-        torch.distributed.init_process_group(backend='nccl', rank=local_rank, world_size=torch.cuda.device_count())
-        torch.cuda.set_device(local_rank)
-    
-    # Set device
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # Detect number of GPUs and set up distributed training if applicable
+    num_gpus = torch.cuda.device_count()
+    is_distributed = num_gpus > 1
 
-    # Load data, build model, and other initialization steps
+    if is_distributed:
+        torch.distributed.init_process_group(backend='nccl')
+        local_rank = torch.distributed.get_rank()
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    print(f"Using device: {device}")
+    print(f"Number of GPUs available: {num_gpus}")
+
     # Generate dataset
-    if local_rank == 0:
+    if not is_distributed or local_rank == 0:
         texts = generate_dataset(num_sentences)
         word2idx, idx2word = build_vocab(texts, vocab_size)
     else:
         texts, word2idx, idx2word = None, None, None
 
-    if args.distributed:
+    if is_distributed:
         # Broadcast data to all processes
-        torch.distributed.broadcast_object_list([texts, word2idx, idx2word], src=0)
-        dataset = TextDataset(texts, word2idx, seq_length)
+        texts = [texts] if local_rank == 0 else [None]
+        torch.distributed.broadcast_object_list(texts, src=0)
+        texts = texts[0]
+
+        word2idx = [word2idx] if local_rank == 0 else [None]
+        torch.distributed.broadcast_object_list(word2idx, src=0)
+        word2idx = word2idx[0]
+
+        idx2word = [idx2word] if local_rank == 0 else [None]
+        torch.distributed.broadcast_object_list(idx2word, src=0)
+        idx2word = idx2word[0]
+
+    # Create dataset and dataloader
+    dataset = TextDataset(texts, word2idx, seq_length)
+    if is_distributed:
         sampler = torch.utils.data.distributed.DistributedSampler(dataset)
         dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=4, pin_memory=True)
     else:
-        dataset = TextDataset(texts, word2idx, seq_length)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
-    # Model, criterion, optimizer, scheduler, and scaler initialization
-    model = SimpleTransformer(vocab_size, d_model, nhead, num_layers).to(device)
-    if args.distributed:
-        model = DistributedDataParallel(model, device_ids=[local_rank])
+    # Create the model
+    model = SimpleTransformer(vocab_size, d_model, nhead, num_layers)
+    model = model.to(device)
+    if is_distributed:
+        model = DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
 
+    # Define loss function and optimizer
     criterion = nn.CrossEntropyLoss(ignore_index=word2idx['<PAD>'])
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2, factor=0.5)
 
-    # Initialize the GradScaler for mixed precision training
-    scaler = GradScaler()
-
     # Load checkpoint if it exists
     start_epoch, best_loss = load_checkpoint(model, optimizer, scheduler, checkpoint_filename)
 
+    # Initialize the GradScaler for mixed precision training
+    scaler = GradScaler()
 
     # Training loop
     no_improvement = 0
     for epoch in range(start_epoch, num_epochs):
         model.train()
         total_loss = 0
-        if args.distributed:
+        if is_distributed:
             sampler.set_epoch(epoch)
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", disable=(args.distributed and local_rank != 0))
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", disable=(is_distributed and local_rank != 0))
         
         for batch, (src, tgt) in enumerate(progress_bar):
             src, tgt = src.to(device), tgt.to(device)
@@ -241,19 +256,19 @@ def main(local_rank, args):
             
             total_loss += loss.item() * accumulation_steps
             
-            if not args.distributed or local_rank == 0:
+            if not is_distributed or local_rank == 0:
                 progress_bar.set_postfix({'loss': loss.item() * accumulation_steps})
         
         avg_loss = total_loss / len(dataloader)
         scheduler.step(avg_loss)
         
-        if not args.distributed or local_rank == 0:
+        if not is_distributed or local_rank == 0:
             print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
             
             # Save checkpoint if it's the best model so far
             if avg_loss < best_loss:
                 best_loss = avg_loss
-                save_checkpoint(model.module if args.distributed else model, optimizer, scheduler, epoch + 1, best_loss, checkpoint_filename)
+                save_checkpoint(model.module if is_distributed else model, optimizer, scheduler, epoch + 1, best_loss, checkpoint_filename)
                 no_improvement = 0
             else:
                 no_improvement += 1
@@ -263,17 +278,18 @@ def main(local_rank, args):
                 print(f"No improvement for {patience} epochs. Stopping training.")
                 break
 
-    if local_rank == 0:
-        # Save and generate text
+    if not is_distributed or local_rank == 0:
         print("Training complete.")
 
         # Generate text
         print("\nGenerating sample texts:")
         start_texts = ["the quick brown", "a journey of", "to be or", "all that glitters", "where there is"]
-        model_for_generation = model.module if args.distributed else model
+        model_for_generation = model.module if is_distributed else model
         for start_text in start_texts:
             generated_text = generate_text(model_for_generation, start_text, word2idx, idx2word, max_length=50, temperature=0.8)
             print(f"\nStarting with '{start_text}':")
             print(generated_text)
 
         print("\nText generation complete.")
+
+

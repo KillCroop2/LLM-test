@@ -755,12 +755,15 @@ def main(local_rank=None):
         idx2word = idx2word[0]
 
     # Create dataset and dataloader
+    num_workers = min(multiprocessing.cpu_count(), 8)
     dataset = TextDataset(texts, word2idx, seq_length)
+
     if is_distributed:
         sampler = torch.utils.data.distributed.DistributedSampler(dataset)
-        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=4, pin_memory=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True, prefetch_factor=2)
     else:
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=5, pin_memory=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, prefetch_factor=2)
+
 
     # Create the model
     model = SimpleTransformer(vocab_size, d_model, nhead, num_layers)
@@ -816,7 +819,6 @@ def main(local_rank=None):
         if not is_distributed or local_rank == 0:
             print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
             
-            # Save checkpoint if it's the best model so far
             if avg_loss < best_loss:
                 best_loss = avg_loss
                 save_checkpoint(model.module if is_distributed else model, optimizer, scheduler, epoch + 1, best_loss, checkpoint_filename)
@@ -824,7 +826,6 @@ def main(local_rank=None):
             else:
                 no_improvement += 1
             
-            # Early stopping
             if no_improvement >= patience:
                 print(f"No improvement for {patience} epochs. Stopping training.")
                 break

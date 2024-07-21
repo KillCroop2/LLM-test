@@ -18,23 +18,26 @@ import io
 nltk.download('punkt', quiet=True)  # For tokenization
 
 class EnhancedTransformer(nn.Module):
-    def __init__(self, vocab_size, d_model, nhead, num_layers, dim_feedforward=1024):
+    def __init__(self, vocab_size, d_model, nhead, num_layers, dim_feedforward=3072, dropout=0.2):
         super(EnhancedTransformer, self).__init__()
         self.embedding = nn.Embedding(vocab_size, d_model)
-        self.pos_encoder = PositionalEncoding(d_model)
-        encoder_layers = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, dropout=0.1, batch_first=True)
+        self.pos_encoder = PositionalEncoding(d_model, dropout)
+        encoder_layers = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers)
         self.fc = nn.Linear(d_model, vocab_size)
+        self.dropout = nn.Dropout(dropout)
         
     def forward(self, src, src_mask=None):
         src = self.embedding(src) * math.sqrt(self.embedding.embedding_dim)
         src = self.pos_encoder(src)
         output = self.transformer_encoder(src, src_mask)
+        output = self.dropout(output)
         return self.fc(output)
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
@@ -44,8 +47,9 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
-    
+        x = x + self.pe[:, :x.size(1)]
+        return self.dropout(x)
+
 class JSONLDataset(Dataset):
     def __init__(self, filepath, word2idx, seq_length):
         self.filepath = filepath
@@ -91,50 +95,7 @@ class JSONLDataset(Dataset):
         tgt = torch.tensor(encoded[start_idx + 1:start_idx + self.seq_length + 1])
         return src, tgt, self.data[idx]['language']
 
-class CustomTextDataset(Dataset):
-    def __init__(self, filepath, word2idx, seq_length):
-        self.filepath = filepath
-        self.word2idx = word2idx
-        self.seq_length = seq_length
-        self.texts = self.load_data(filepath)
-        if self.word2idx is not None:
-            self.encoded_texts = self.encode_texts()
-        
-    def load_data(self, filepath):
-        try:
-            with io.open(filepath, 'r', encoding='utf-8') as file:
-                lines = file.readlines()
-        except UnicodeDecodeError:
-            with io.open(filepath, 'r', encoding='iso-8859-1') as file:
-                lines = file.readlines()
-        
-        texts = [' '.join(nltk.word_tokenize(line.strip().lower())) for line in lines]
-        return texts
-
-    def encode_texts(self):
-        encoded = []
-        for text in self.texts:
-            tokens = [self.word2idx.get(word, self.word2idx['<UNK>']) for word in text.split()]
-            if len(tokens) < self.seq_length + 1:
-                tokens += [self.word2idx['<PAD>']] * (self.seq_length + 1 - len(tokens))
-            encoded.append(tokens)
-        return encoded
-
-    def __len__(self):
-        return len(self.texts)
-
-    def __getitem__(self, idx):
-        if self.word2idx is None:
-            raise ValueError("word2idx is not initialized")
-        
-        encoded = self.encoded_texts[idx]
-        start_idx = random.randint(0, len(encoded) - self.seq_length - 1)
-        src = torch.tensor(encoded[start_idx:start_idx + self.seq_length])
-        tgt = torch.tensor(encoded[start_idx + 1:start_idx + self.seq_length + 1])
-        return src, tgt
-
-
-def generate_text(model, start_text, word2idx, idx2word, max_length=20, temperature=1.0):
+def generate_text(model, start_text, word2idx, idx2word, max_length=50, temperature=0.8):
     model.eval()
     words = start_text.split()
     device = next(model.parameters()).device
@@ -153,15 +114,12 @@ def generate_text(model, start_text, word2idx, idx2word, max_length=20, temperat
     
     return ' '.join(words)
 
-
-
 def build_vocab(data, vocab_size):
     word_counts = Counter(word for item in data for word in item['text'].split())
     vocab = ['<PAD>', '<UNK>'] + [word for word, _ in word_counts.most_common(vocab_size - 2)]
     word2idx = {word: idx for idx, word in enumerate(vocab)}
     idx2word = {idx: word for word, idx in word2idx.items()}
     return word2idx, idx2word
-
 
 def save_checkpoint(model, optimizer, scheduler, epoch, loss, filename):
     checkpoint = {
@@ -179,17 +137,12 @@ def load_checkpoint(model, optimizer, scheduler, filename):
         print(f"Loading checkpoint '{filename}'")
         checkpoint = torch.load(filename, map_location='cpu')
         
-        # Check if the model is wrapped with DistributedDataParallel
         if isinstance(model, DistributedDataParallel):
-            # If it is, we need to add the 'module.' prefix to the keys
             new_state_dict = {f"module.{k}": v for k, v in checkpoint['model_state_dict'].items()}
         else:
-            # If it's not, we need to remove the 'module.' prefix from the keys
             new_state_dict = {k.replace('module.', ''): v for k, v in checkpoint['model_state_dict'].items()}
         
-        # Load the modified state dict
         model.load_state_dict(new_state_dict)
-        
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scheduler and 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -202,19 +155,20 @@ def load_checkpoint(model, optimizer, scheduler, filename):
         return 0, float('inf')
 
 def main(local_rank, world_size):
-    # Hyperparameters
-    vocab_size = 10000
-    d_model = 512
-    nhead = 16
-    num_layers = 12
-    batch_size = 64
-    seq_length = 50
-    num_epochs = 50
-    learning_rate = 0.00005
-    custom_dataset_path = 'LLM-test/content/dataset.jsonl'  # Updated to use the new JSONL file
+    # Enhanced Hyperparameters
+    vocab_size = 30000
+    d_model = 768
+    nhead = 12
+    num_layers = 16
+    batch_size = 32
+    seq_length = 128
+    num_epochs = 100
+    learning_rate = 1e-4
+    custom_dataset_path = 'LLM-test/content/dataset.jsonl'
     checkpoint_filename = 'checkpoint.pth'
-    accumulation_steps = 4
-    patience = 5
+    accumulation_steps = 8
+    patience = 10
+    warmup_steps = 4000
 
     # Set up distributed training if applicable
     if world_size > 1:
@@ -259,16 +213,23 @@ def main(local_rank, world_size):
     else:
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, prefetch_factor=2)
 
-    # Create the model
-    model = EnhancedTransformer(vocab_size, d_model, nhead, num_layers)
+    # Create the enhanced model
+    model = EnhancedTransformer(vocab_size, d_model, nhead, num_layers, dim_feedforward=3072, dropout=0.2)
     model = model.to(device)
     if is_distributed:
         model = DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
 
     # Define loss function and optimizer
-    criterion = nn.CrossEntropyLoss(ignore_index=word2idx['<PAD>'])
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2, factor=0.5)
+    criterion = nn.CrossEntropyLoss(ignore_index=word2idx['<PAD>'], label_smoothing=0.1)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-9, weight_decay=0.01)
+    
+    # Learning rate scheduler with warmup
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos((step - warmup_steps) / (num_epochs * len(dataloader) - warmup_steps) * math.pi)))
+    
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Load checkpoint if it exists
     start_epoch, best_loss = load_checkpoint(model, optimizer, scheduler, checkpoint_filename)
@@ -297,18 +258,18 @@ def main(local_rank, world_size):
             
             if (batch + 1) % accumulation_steps == 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                scheduler.step()
             
             total_loss += loss.item() * accumulation_steps
             
             if not is_distributed or local_rank == 0:
-                progress_bar.set_postfix({'loss': loss.item() * accumulation_steps})
+                progress_bar.set_postfix({'loss': loss.item() * accumulation_steps, 'lr': scheduler.get_last_lr()[0]})
         
         avg_loss = total_loss / len(dataloader)
-        scheduler.step(avg_loss)
         
         if not is_distributed or local_rank == 0:
             print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}")

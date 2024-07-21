@@ -11,7 +11,7 @@ from tqdm import tqdm
 import os
 import nltk
 import multiprocessing
-import argparse
+import io
 
 # Ensure NLTK datasets are downloaded if needed
 nltk.download('punkt', quiet=True)  # For tokenization
@@ -51,29 +51,42 @@ class CustomTextDataset(Dataset):
         self.word2idx = word2idx
         self.seq_length = seq_length
         self.texts = self.load_data(filepath)
-
+        if self.word2idx is not None:
+            self.encoded_texts = self.encode_texts()
+        
     def load_data(self, filepath):
-        with open(filepath, 'r') as file:
-            lines = file.readlines()
-        # Tokenize and preprocess
-        texts = []
-        for line in lines:
-            tokens = nltk.word_tokenize(line.strip().lower())
-            texts.append(' '.join(tokens))
+        try:
+            with io.open(filepath, 'r', encoding='utf-8') as file:
+                lines = file.readlines()
+        except UnicodeDecodeError:
+            with io.open(filepath, 'r', encoding='iso-8859-1') as file:
+                lines = file.readlines()
+        
+        texts = [' '.join(nltk.word_tokenize(line.strip().lower())) for line in lines]
         return texts
+
+    def encode_texts(self):
+        encoded = []
+        for text in self.texts:
+            tokens = [self.word2idx.get(word, self.word2idx['<UNK>']) for word in text.split()]
+            if len(tokens) < self.seq_length + 1:
+                tokens += [self.word2idx['<PAD>']] * (self.seq_length + 1 - len(tokens))
+            encoded.append(tokens)
+        return encoded
 
     def __len__(self):
         return len(self.texts)
 
     def __getitem__(self, idx):
-        text = self.texts[idx]
-        encoded = [self.word2idx.get(word, self.word2idx['<UNK>']) for word in text.split()]
-        if len(encoded) < self.seq_length + 1:
-            encoded += [self.word2idx['<PAD>']] * (self.seq_length + 1 - len(encoded))
+        if self.word2idx is None:
+            raise ValueError("word2idx is not initialized")
+        
+        encoded = self.encoded_texts[idx]
         start_idx = random.randint(0, len(encoded) - self.seq_length - 1)
         src = torch.tensor(encoded[start_idx:start_idx + self.seq_length])
         tgt = torch.tensor(encoded[start_idx + 1:start_idx + self.seq_length + 1])
         return src, tgt
+
 
 def generate_text(model, start_text, word2idx, idx2word, max_length=20, temperature=1.0):
     model.eval()
@@ -95,8 +108,16 @@ def generate_text(model, start_text, word2idx, idx2word, max_length=20, temperat
     return ' '.join(words)
 
 
+
 def build_vocab(texts, vocab_size):
-    word_counts = Counter(word for text in texts for word in text.lower().split())
+    word_counts = Counter(word for text in texts for word in text.split())
+    vocab = ['<PAD>', '<UNK>'] + [word for word, _ in word_counts.most_common(vocab_size - 2)]
+    word2idx = {word: idx for idx, word in enumerate(vocab)}
+    idx2word = {idx: word for word, idx in word2idx.items()}
+    return word2idx, idx2word
+    
+    words = nltk.word_tokenize(text.lower())
+    word_counts = Counter(words)
     vocab = ['<PAD>', '<UNK>'] + [word for word, _ in word_counts.most_common(vocab_size - 2)]
     word2idx = {word: idx for idx, word in enumerate(vocab)}
     idx2word = {idx: word for word, idx in word2idx.items()}
@@ -137,7 +158,7 @@ def main(local_rank=None, world_size=None):
     seq_length = 50
     num_epochs = 50
     learning_rate = 0.00005
-    custom_dataset_path = 'LLM-test/dataset.txt'
+    custom_dataset_path = 'LLM-test/content/dataset.txt'
     checkpoint_filename = 'enhanced_transformer_checkpoint.pth'
     accumulation_steps = 4
     patience = 5
@@ -156,11 +177,15 @@ def main(local_rank=None, world_size=None):
     print(f"Using device: {device}")
     print(f"Is distributed: {is_distributed}")
 
-    # Load custom dataset and build vocab only on rank 0 or in non-distributed mode
+   # Load custom dataset and build vocab only on rank 0 or in non-distributed mode
     if not is_distributed or local_rank == 0:
-        dataset = CustomTextDataset(custom_dataset_path, word2idx=None, seq_length=seq_length)
-        texts = dataset.texts
-        word2idx, idx2word = build_vocab(texts, vocab_size)
+        try:
+            temp_dataset = CustomTextDataset(custom_dataset_path, word2idx=None, seq_length=seq_length)
+            texts = temp_dataset.texts
+            word2idx, idx2word = build_vocab(texts, vocab_size)
+        except Exception as e:
+            print(f"Error loading dataset: {e}")
+            return
     else:
         texts, word2idx, idx2word = None, None, None
 
@@ -178,15 +203,15 @@ def main(local_rank=None, world_size=None):
         torch.distributed.broadcast_object_list(idx2word, src=0)
         idx2word = idx2word[0]
 
-    # Create dataset and dataloader
+    # Create dataset and dataloader with initialized word2idx
     dataset = CustomTextDataset(custom_dataset_path, word2idx, seq_length)
     num_workers = min(multiprocessing.cpu_count(), 8)
 
     if is_distributed:
         sampler = torch.utils.data.distributed.DistributedSampler(dataset)
-        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True, prefetch_factor=1)
+        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True, prefetch_factor=2)
     else:
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, prefetch_factor=1)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, prefetch_factor=2)
 
     # Create the model
     model = EnhancedTransformer(vocab_size, d_model, nhead, num_layers)

@@ -158,7 +158,7 @@ def main(local_rank, world_size):
     seq_length = 50
     num_epochs = 50
     learning_rate = 0.00005
-    custom_dataset_path = 'LLM-test/dataset.txt'
+    custom_dataset_path = 'LLM-test/content/dataset.txt'
     checkpoint_filename = 'enhanced_transformer_checkpoint.pth'
     accumulation_steps = 4
     patience = 5

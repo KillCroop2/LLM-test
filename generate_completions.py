@@ -1,6 +1,7 @@
 import torch
 import argparse
-from train_module import EnhancedTransformer, build_vocab, generate_text, CustomTextDataset
+import json
+from train_module import EnhancedTransformer, build_vocab, generate_text, JSONLDataset
 
 def load_model(checkpoint_path, vocab_size, d_model, nhead, num_layers):
     model = EnhancedTransformer(vocab_size, d_model, nhead, num_layers)
@@ -8,10 +9,24 @@ def load_model(checkpoint_path, vocab_size, d_model, nhead, num_layers):
     model.load_state_dict({k.replace('module.', ''): v for k, v in checkpoint['model_state_dict'].items()})
     return model
 
+def load_jsonl_data(filepath):
+    data = []
+    with open(filepath, 'r', encoding='utf-8') as file:
+        for line in file:
+            json_obj = json.loads(line.strip())
+            text = ' '.join(json_obj['content'])
+            data.append({
+                'text': text,
+                'language': json_obj['language'],
+                'url': json_obj['url'],
+                'title': json_obj['metadata']['title']
+            })
+    return data
+
 def main():
     parser = argparse.ArgumentParser(description="Generate text completions using a trained model.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the model checkpoint")
-    parser.add_argument("--dataset", type=str, required=True, help="Path to the dataset used for training")
+    parser.add_argument("--dataset", type=str, required=True, help="Path to the dataset used for training (JSONL format)")
     parser.add_argument("--vocab_size", type=int, default=10000, help="Vocabulary size")
     parser.add_argument("--d_model", type=int, default=512, help="Model dimension")
     parser.add_argument("--nhead", type=int, default=16, help="Number of attention heads")
@@ -21,8 +36,8 @@ def main():
     args = parser.parse_args()
 
     # Load the dataset to build the vocabulary
-    dataset = CustomTextDataset(args.dataset, word2idx=None, seq_length=50)
-    word2idx, idx2word = build_vocab(dataset.texts, args.vocab_size)
+    data = load_jsonl_data(args.dataset)
+    word2idx, idx2word = build_vocab(data, args.vocab_size)
 
     # Load the model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

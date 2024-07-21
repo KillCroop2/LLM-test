@@ -11,6 +11,7 @@ from tqdm import tqdm
 import os
 import nltk
 import multiprocessing
+import json
 import io
 
 # Ensure NLTK datasets are downloaded if needed
@@ -44,6 +45,51 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         return x + self.pe[:, :x.size(1)]
+    
+class JSONLDataset(Dataset):
+    def __init__(self, filepath, word2idx, seq_length):
+        self.filepath = filepath
+        self.word2idx = word2idx
+        self.seq_length = seq_length
+        self.data = self.load_data(filepath)
+        if self.word2idx is not None:
+            self.encoded_texts = self.encode_texts()
+        
+    def load_data(self, filepath):
+        data = []
+        with open(filepath, 'r', encoding='utf-8') as file:
+            for line in file:
+                json_obj = json.loads(line.strip())
+                text = ' '.join(json_obj['content'])
+                data.append({
+                    'text': text,
+                    'language': json_obj['language'],
+                    'url': json_obj['url'],
+                    'title': json_obj['metadata']['title']
+                })
+        return data
+
+    def encode_texts(self):
+        encoded = []
+        for item in self.data:
+            tokens = [self.word2idx.get(word, self.word2idx['<UNK>']) for word in item['text'].split()]
+            if len(tokens) < self.seq_length + 1:
+                tokens += [self.word2idx['<PAD>']] * (self.seq_length + 1 - len(tokens))
+            encoded.append(tokens)
+        return encoded
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        if self.word2idx is None:
+            raise ValueError("word2idx is not initialized")
+        
+        encoded = self.encoded_texts[idx]
+        start_idx = random.randint(0, len(encoded) - self.seq_length - 1)
+        src = torch.tensor(encoded[start_idx:start_idx + self.seq_length])
+        tgt = torch.tensor(encoded[start_idx + 1:start_idx + self.seq_length + 1])
+        return src, tgt, self.data[idx]['language']
 
 class CustomTextDataset(Dataset):
     def __init__(self, filepath, word2idx, seq_length):
@@ -109,15 +155,8 @@ def generate_text(model, start_text, word2idx, idx2word, max_length=20, temperat
 
 
 
-def build_vocab(texts, vocab_size):
-    word_counts = Counter(word for text in texts for word in text.split())
-    vocab = ['<PAD>', '<UNK>'] + [word for word, _ in word_counts.most_common(vocab_size - 2)]
-    word2idx = {word: idx for idx, word in enumerate(vocab)}
-    idx2word = {idx: word for word, idx in word2idx.items()}
-    return word2idx, idx2word
-    
-    words = nltk.word_tokenize(text.lower())
-    word_counts = Counter(words)
+def build_vocab(data, vocab_size):
+    word_counts = Counter(word for item in data for word in item['text'].split())
     vocab = ['<PAD>', '<UNK>'] + [word for word, _ in word_counts.most_common(vocab_size - 2)]
     word2idx = {word: idx for idx, word in enumerate(vocab)}
     idx2word = {idx: word for word, idx in word2idx.items()}
@@ -172,7 +211,7 @@ def main(local_rank, world_size):
     seq_length = 50
     num_epochs = 50
     learning_rate = 0.00005
-    custom_dataset_path = 'LLM-test/content/dataset.txt'
+    custom_dataset_path = 'LLM-test/content/dataset.jsonl'  # Updated to use the new JSONL file
     checkpoint_filename = 'enhanced_transformer_checkpoint.pth'
     accumulation_steps = 4
     patience = 5
@@ -190,24 +229,18 @@ def main(local_rank, world_size):
     print(f"Using device: {device}")
     print(f"Is distributed: {is_distributed}")
 
-    # Load custom dataset and build vocab only on rank 0 or in non-distributed mode
     if not is_distributed or local_rank == 0:
         try:
-            temp_dataset = CustomTextDataset(custom_dataset_path, word2idx=None, seq_length=seq_length)
-            texts = temp_dataset.texts
-            word2idx, idx2word = build_vocab(texts, vocab_size)
+            temp_dataset = JSONLDataset(custom_dataset_path, word2idx=None, seq_length=seq_length)
+            word2idx, idx2word = build_vocab(temp_dataset.data, vocab_size)
         except Exception as e:
             print(f"Error loading dataset: {e}")
             return
     else:
-        texts, word2idx, idx2word = None, None, None
+        word2idx, idx2word = None, None
 
     # Broadcast data to all processes if in distributed mode
     if is_distributed:
-        texts = [texts] if local_rank == 0 else [None]
-        torch.distributed.broadcast_object_list(texts, src=0)
-        texts = texts[0]
-
         word2idx = [word2idx] if local_rank == 0 else [None]
         torch.distributed.broadcast_object_list(word2idx, src=0)
         word2idx = word2idx[0]
@@ -217,7 +250,7 @@ def main(local_rank, world_size):
         idx2word = idx2word[0]
 
     # Create dataset and dataloader
-    dataset = CustomTextDataset(custom_dataset_path, word2idx, seq_length)
+    dataset = JSONLDataset(custom_dataset_path, word2idx, seq_length)
     num_workers = min(multiprocessing.cpu_count(), 8)
 
     if is_distributed:
@@ -252,7 +285,7 @@ def main(local_rank, world_size):
             sampler.set_epoch(epoch)
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", disable=(is_distributed and local_rank != 0))
         
-        for batch, (src, tgt) in enumerate(progress_bar):
+        for batch, (src, tgt, language) in enumerate(progress_bar):
             src, tgt = src.to(device), tgt.to(device)
             
             with autocast():

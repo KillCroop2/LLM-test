@@ -18,8 +18,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 visited_urls = set()
 url_queue = deque()
 data_queue = deque()
-MAX_PAGES = 1000
-CONCURRENT_TASKS = 100
+MAX_PAGES = 10000
+CONCURRENT_TASKS = 500
 MIN_WORDS_PER_LINE = 5
 MAX_WORDS_PER_LINE = 100
 SIMILARITY_THRESHOLD = 0.8  # Adjust this value to control similarity detection
@@ -143,5 +143,5 @@ def main(starting_url):
     logging.info(f"Unique content pieces: {len(content_hashes)}")
 
 if __name__ == "__main__":
-    starting_url = "https://www.github.com/"
+    starting_url = "https://www.wikipedia.org/"
     main(starting_url)

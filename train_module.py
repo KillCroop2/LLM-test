@@ -212,7 +212,7 @@ def main(local_rank, world_size):
     num_epochs = 50
     learning_rate = 0.00005
     custom_dataset_path = 'LLM-test/content/dataset.jsonl'  # Updated to use the new JSONL file
-    checkpoint_filename = 'enhanced_transformer_checkpoint.pth'
+    checkpoint_filename = 'checkpoint.pth'
     accumulation_steps = 4
     patience = 5
 

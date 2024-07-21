@@ -99,14 +99,14 @@ def generate_text(model, start_text, word2idx, idx2word, max_length=50, temperat
     model.eval()
     words = start_text.split()
     device = next(model.parameters()).device
-    current_ids = torch.tensor([word2idx.get(w, word2idx['<UNK>']) for w in words]).unsqueeze(0).to(device)
+    current_ids = torch.tensor([word2idx.get(w, word2idx['<UNK>']) for w in words], dtype=torch.long).unsqueeze(0).to(device)
     
     with torch.no_grad():
         for _ in range(max_length):
             logits = model(current_ids)
             next_word_logits = logits[0, -1, :] / temperature
             next_word = torch.multinomial(torch.softmax(next_word_logits, dim=-1), num_samples=1).item()
-            current_ids = torch.cat([current_ids, torch.tensor([[next_word]]).to(device)], dim=1)
+            current_ids = torch.cat([current_ids, torch.tensor([[next_word]], dtype=torch.long, device=device)], dim=1)
             words.append(idx2word.get(next_word, '<UNK>'))
             
             if words[-1] == '.':
@@ -162,7 +162,7 @@ def main(local_rank, world_size):
     num_layers = 16
     batch_size = 32
     seq_length = 128
-    num_epochs = 100
+    num_epochs = 500
     learning_rate = 1e-4
     custom_dataset_path = 'LLM-test/content/dataset.jsonl'
     checkpoint_filename = 'checkpoint.pth'

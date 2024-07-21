@@ -1,6 +1,6 @@
 import torch
 import os
-from train_module import main  # Import the main function from the new module
+from train_module import main
 
 if __name__ == '__main__':
     num_gpus = torch.cuda.device_count()
@@ -12,4 +12,5 @@ if __name__ == '__main__':
         # Spawn processes
         torch.multiprocessing.spawn(main, args=(num_gpus,), nprocs=num_gpus)
     else:
-        main()
+        # Run in single GPU mode
+        main(local_rank=0, world_size=1)

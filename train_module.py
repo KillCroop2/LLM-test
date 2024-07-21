@@ -148,7 +148,7 @@ def load_checkpoint(model, optimizer, scheduler, filename):
         return epoch, loss
     return 0, float('inf')
 
-def main(local_rank=None, world_size=None):
+def main(local_rank, world_size):
     # Hyperparameters
     vocab_size = 10000
     d_model = 512
@@ -158,13 +158,13 @@ def main(local_rank=None, world_size=None):
     seq_length = 50
     num_epochs = 50
     learning_rate = 0.00005
-    custom_dataset_path = 'LLM-test/content/dataset.txt'
+    custom_dataset_path = 'LLM-test/dataset.txt'
     checkpoint_filename = 'enhanced_transformer_checkpoint.pth'
     accumulation_steps = 4
     patience = 5
 
     # Set up distributed training if applicable
-    if world_size is not None and world_size > 1:
+    if world_size > 1:
         is_distributed = True
         torch.distributed.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=local_rank)
         torch.cuda.set_device(local_rank)
@@ -172,12 +172,11 @@ def main(local_rank=None, world_size=None):
     else:
         is_distributed = False
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        local_rank = 0
     
     print(f"Using device: {device}")
     print(f"Is distributed: {is_distributed}")
 
-   # Load custom dataset and build vocab only on rank 0 or in non-distributed mode
+    # Load custom dataset and build vocab only on rank 0 or in non-distributed mode
     if not is_distributed or local_rank == 0:
         try:
             temp_dataset = CustomTextDataset(custom_dataset_path, word2idx=None, seq_length=seq_length)
@@ -203,7 +202,7 @@ def main(local_rank=None, world_size=None):
         torch.distributed.broadcast_object_list(idx2word, src=0)
         idx2word = idx2word[0]
 
-    # Create dataset and dataloader with initialized word2idx
+    # Create dataset and dataloader
     dataset = CustomTextDataset(custom_dataset_path, word2idx, seq_length)
     num_workers = min(multiprocessing.cpu_count(), 8)
 

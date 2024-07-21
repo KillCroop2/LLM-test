@@ -127,7 +127,7 @@ def load_checkpoint(model, optimizer, scheduler, filename):
         return epoch, loss
     return 0, float('inf')
 
-def main(local_rank=None):
+def main(local_rank=None, world_size=None):
     # Hyperparameters
     vocab_size = 10000
     d_model = 512
@@ -142,22 +142,21 @@ def main(local_rank=None):
     accumulation_steps = 4
     patience = 5
 
-    # Detect number of GPUs and set up distributed training if applicable
-    num_gpus = torch.cuda.device_count()
-    is_distributed = num_gpus > 1
-
-    if is_distributed:
-        torch.distributed.init_process_group(backend='nccl')
-        local_rank = torch.distributed.get_rank()
+    # Set up distributed training if applicable
+    if world_size is not None and world_size > 1:
+        is_distributed = True
+        torch.distributed.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=local_rank)
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
     else:
+        is_distributed = False
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        local_rank = 0
     
     print(f"Using device: {device}")
-    print(f"Number of GPUs available: {num_gpus}")
+    print(f"Is distributed: {is_distributed}")
 
-    # Load custom dataset and build vocab only on rank 0
+    # Load custom dataset and build vocab only on rank 0 or in non-distributed mode
     if not is_distributed or local_rank == 0:
         dataset = CustomTextDataset(custom_dataset_path, word2idx=None, seq_length=seq_length)
         texts = dataset.texts
@@ -165,7 +164,7 @@ def main(local_rank=None):
     else:
         texts, word2idx, idx2word = None, None, None
 
-    # Broadcast data to all processes
+    # Broadcast data to all processes if in distributed mode
     if is_distributed:
         texts = [texts] if local_rank == 0 else [None]
         torch.distributed.broadcast_object_list(texts, src=0)

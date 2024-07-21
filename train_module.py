@@ -137,16 +137,30 @@ def save_checkpoint(model, optimizer, scheduler, epoch, loss, filename):
 
 def load_checkpoint(model, optimizer, scheduler, filename):
     if os.path.isfile(filename):
+        print(f"Loading checkpoint '{filename}'")
         checkpoint = torch.load(filename, map_location='cpu')
-        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Check if the model is wrapped with DistributedDataParallel
+        if isinstance(model, DistributedDataParallel):
+            # If it is, we need to add the 'module.' prefix to the keys
+            new_state_dict = {f"module.{k}": v for k, v in checkpoint['model_state_dict'].items()}
+        else:
+            # If it's not, we need to remove the 'module.' prefix from the keys
+            new_state_dict = {k.replace('module.', ''): v for k, v in checkpoint['model_state_dict'].items()}
+        
+        # Load the modified state dict
+        model.load_state_dict(new_state_dict)
+        
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scheduler and 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         epoch = checkpoint['epoch']
         loss = checkpoint['loss']
-        print(f"Checkpoint loaded from {filename}")
+        print(f"Checkpoint loaded. Resuming training from epoch {epoch}")
         return epoch, loss
-    return 0, float('inf')
+    else:
+        print(f"No checkpoint found at '{filename}'")
+        return 0, float('inf')
 
 def main(local_rank, world_size):
     # Hyperparameters

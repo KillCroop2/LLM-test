@@ -143,5 +143,5 @@ def main(starting_url):
     logging.info(f"Unique content pieces: {len(content_hashes)}")
 
 if __name__ == "__main__":
-    starting_url = "https://www.wikipedia.org/"
+    starting_url = "https://en.wikipedia.org/wiki/Main_Page"
     main(starting_url)
